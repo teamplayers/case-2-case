@@ -17,7 +17,10 @@ def _whisper():
     if _whisper_model is None:
         from faster_whisper import WhisperModel
 
-        _whisper_model = WhisperModel(settings.whisper_model, device="auto", compute_type="auto")
+        try:
+            _whisper_model = WhisperModel(settings.whisper_model, device="cuda", compute_type="float16")
+        except Exception:
+            _whisper_model = WhisperModel(settings.whisper_model, device="cpu", compute_type="int8")
     return _whisper_model
 
 
