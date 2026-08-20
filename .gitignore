@@ -1,0 +1,12 @@
+.env
+.venv
+venv
+__pycache__/
+*.pyc
+data/
+backend/data/
+node_modules/
+frontend/dist/
+.DS_Store
+*.egg-info/
+.python-version
