@@ -42,17 +42,7 @@ def _openai() -> OpenAI:
     return OpenAI(api_key=settings.openai_api_key)
 
 
-def translate_and_analyze(transcript: str, categories: list[str]) -> dict:
-    client = _openai()
-    cats = categories or ["uncategorized"]
-    prompt = (
-        "You are helping a support case desk. The transcript may be Arabic, English, or mixed "
-        "(including Indian English).\n"
-        "Return JSON with keys: translation (English), summary (short bullets as one string), "
-        "suggestedCategory (exactly one value from the provided list).\n"
-        f"Categories: {json.dumps(cats)}\n\n"
-        f"Transcript:\n{transcript}"
-    )
+def _chat_json(client: OpenAI, prompt: str) -> dict:
     resp = client.chat.completions.create(
         model=settings.openai_model,
         response_format={"type": "json_object"},
@@ -62,15 +52,36 @@ def translate_and_analyze(transcript: str, categories: list[str]) -> dict:
         ],
         temperature=0.2,
     )
-    data = json.loads(resp.choices[0].message.content or "{}")
+    return json.loads(resp.choices[0].message.content or "{}")
+
+
+def translate_text(transcript: str) -> str:
+    data = _chat_json(
+        _openai(),
+        "Translate this support-call transcript to English. Keep names. "
+        "Return JSON {\"translation\": \"...\"}.\n\n" + transcript,
+    )
+    return data.get("translation") or ""
+
+
+def summarize_text(english: str) -> str:
+    data = _chat_json(
+        _openai(),
+        "Summarize this support case in short English bullets as one string. "
+        "Return JSON {\"summary\": \"...\"}.\n\n" + english,
+    )
+    return data.get("summary") or ""
+
+
+def categorize_text(english: str, categories: list[str]) -> str:
+    cats = categories or ["uncategorized"]
+    data = _chat_json(
+        _openai(),
+        "Pick exactly one category for this support case from the list. "
+        f"Return JSON {{\"suggestedCategory\": \"...\"}}.\nCategories: {json.dumps(cats)}\n\n{english}",
+    )
     suggested = data.get("suggestedCategory") or cats[0]
-    if suggested not in cats:
-        suggested = cats[0]
-    return {
-        "translation": data.get("translation") or "",
-        "summary": data.get("summary") or "",
-        "suggestedCategory": suggested,
-    }
+    return suggested if suggested in cats else cats[0]
 
 
 async def set_ai(case_id: str, **fields) -> None:
@@ -80,21 +91,45 @@ async def set_ai(case_id: str, **fields) -> None:
     await db.cases.update_one({"_id": oid(case_id)}, {"$set": patch})
 
 
+async def append_conversation_log(
+    case_id: str,
+    *,
+    transcript: str,
+    translation: str | None = None,
+) -> None:
+    db = get_db()
+    entry = {
+        "type": "transcription",
+        "transcript": transcript,
+        "translation": translation,
+        "createdAt": utcnow(),
+    }
+    await db.cases.update_one(
+        {"_id": oid(case_id)},
+        {"$push": {"conversationLog": entry}, "$set": {"updatedAt": utcnow()}},
+    )
+
+
 async def run_audio_job(case_id: str, audio_path: str, categories: list[str]) -> None:
     try:
         await set_ai(case_id, status="transcribing", error=None)
         transcript = transcribe_file(Path(audio_path))
         await set_ai(case_id, transcript=transcript, status="translating")
-        await set_ai(case_id, status="summarizing")
-        await set_ai(case_id, status="categorizing")
-        result = translate_and_analyze(transcript, categories)
+        translation = translate_text(transcript)
+        await set_ai(case_id, translation=translation, status="summarizing")
+        summary = summarize_text(translation or transcript)
+        await set_ai(case_id, summary=summary, status="categorizing")
+        suggested = categorize_text(translation or transcript, categories)
         await set_ai(
             case_id,
             status="done",
-            translation=result["translation"],
-            summary=result["summary"],
-            suggestedCategory=result["suggestedCategory"],
+            suggestedCategory=suggested,
             error=None,
+        )
+        await append_conversation_log(
+            case_id,
+            transcript=transcript,
+            translation=translation or None,
         )
     except Exception as exc:  # noqa: BLE001 — persist any pipeline failure
         await set_ai(case_id, status="failed", error=str(exc))

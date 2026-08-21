@@ -5,17 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from app.auth import COOKIE, create_token, get_current_user, hash_password, verify_password
 from app.db import get_db
 from app.models import ChangePasswordIn, LoginIn, RegisterIn, utcnow
+from app.permissions import public_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-
-def _public_user(user: dict) -> dict:
-    return {
-        "id": user["id"],
-        "username": user["username"],
-        "role": user["role"],
-        "mustChangePassword": user.get("mustChangePassword", False),
-    }
 
 
 @router.post("/login")
@@ -24,17 +16,12 @@ async def login(body: LoginIn, response: Response):
     user = await db.users.find_one({"username": body.username})
     if not user or not verify_password(body.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    token = create_token(str(user["_id"]), user["role"])
+    pub = public_user(user)
+    if pub["status"] != "approved":
+        raise HTTPException(status_code=403, detail="Account pending approval")
+    token = create_token(pub["id"], pub.get("appRole"))
     response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
-    return {
-        "token": token,
-        "user": {
-            "id": str(user["_id"]),
-            "username": user["username"],
-            "role": user["role"],
-            "mustChangePassword": user.get("mustChangePassword", False),
-        },
-    }
+    return {"token": token, "user": pub}
 
 
 @router.post("/logout")
@@ -44,35 +31,36 @@ async def logout(response: Response):
 
 
 @router.post("/register")
-async def register(body: RegisterIn, response: Response):
+async def register(body: RegisterIn):
     db = get_db()
-    if await db.users.find_one({"username": body.username}):
+    username = body.username.strip()
+    email = body.email.strip().lower()
+    if await db.users.find_one({"username": username}):
         raise HTTPException(status_code=409, detail="Username already taken")
-    result = await db.users.insert_one(
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    await db.users.insert_one(
         {
-            "username": body.username,
+            "username": username,
+            "name": body.name.strip(),
+            "email": email,
             "passwordHash": hash_password(body.password),
-            "role": "customer",
+            "appRole": None,
+            "status": "pending",
             "mustChangePassword": False,
             "createdAt": utcnow(),
         }
     )
-    token = create_token(str(result.inserted_id), "customer")
-    response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=7 * 24 * 3600)
     return {
-        "token": token,
-        "user": {
-            "id": str(result.inserted_id),
-            "username": body.username,
-            "role": "customer",
-            "mustChangePassword": False,
-        },
+        "ok": True,
+        "status": "pending",
+        "message": "Account created. A SuperAdmin must approve before you can sign in.",
     }
 
 
 @router.get("/me")
 async def me(user: Annotated[dict, Depends(get_current_user)]):
-    return _public_user(user)
+    return user
 
 
 @router.post("/change-password")

@@ -7,6 +7,8 @@ data/
 backend/data/
 node_modules/
 frontend/dist/
+frontend/build/
+frontend/.dart_tool/
 .DS_Store
 *.egg-info/
 .python-version

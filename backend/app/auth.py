@@ -8,7 +8,8 @@ from passlib.context import CryptContext
 
 from app.config import settings
 from app.db import get_db
-from app.models import oid, serialize
+from app.models import oid
+from app.permissions import is_app_operator, public_user
 
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer = HTTPBearer(auto_error=False)
@@ -24,10 +25,10 @@ def verify_password(password: str, hashed: str) -> bool:
     return pwd.verify(password, hashed)
 
 
-def create_token(user_id: str, role: str) -> str:
+def create_token(user_id: str, app_role: str | None) -> str:
     payload = {
         "sub": user_id,
-        "role": role,
+        "appRole": app_role,
         "exp": datetime.now(timezone.utc) + timedelta(days=7),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
@@ -52,15 +53,23 @@ async def get_current_user(
     user = await db.users.find_one({"_id": oid(payload["sub"])})
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    public = serialize(user)
-    assert public is not None
-    public.pop("passwordHash", None)
-    return public
+    return public_user(user)
 
 
-def require_roles(*roles: str):
+def require_app_operators():
     async def checker(user: Annotated[dict, Depends(get_current_user)]) -> dict:
-        if user["role"] not in roles:
+        if not is_app_operator(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        return user
+
+    return checker
+
+
+def require_duperadmin():
+    async def checker(user: Annotated[dict, Depends(get_current_user)]) -> dict:
+        from app.permissions import is_duperadmin
+
+        if not is_duperadmin(user):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         return user
 

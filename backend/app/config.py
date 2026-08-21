@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     whisper_model: str = "large-v3"
     data_dir: str = str(ROOT / "data")
-    cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    cors_origins: str = "http://127.0.0.1:8080,http://localhost:8080"
 
     @property
     def origins(self) -> list[str]:
